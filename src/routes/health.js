@@ -17,6 +17,7 @@ router.get('/', (req, res) => {
     status: 'ok',
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
+    geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash (default)',
     ai: {
       geminiAvailable: stats.geminiAvailable,
       openaiAvailable: stats.openaiAvailable,
