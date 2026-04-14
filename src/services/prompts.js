@@ -76,12 +76,16 @@ RESPOND IN THIS EXACT JSON FORMAT (no markdown, no backticks, just raw JSON):
 RULES:
 - Always return valid JSON. Never include markdown formatting.
 - If you can't read the screen clearly, set phase to "idle" and extractedText to "Screen not readable".
-- The "solution" field should be null if phase is "coding" or "idle".
+- CRITICAL: If you can see ANY coding problem statement, function signature, constraints, or examples on screen, set phase to "reading_question" and ALWAYS generate a complete solution — even if code is already partially written in the editor. The user needs the optimal solution regardless.
+- If the screen only shows code being typed with NO visible problem statement and NO errors, set phase to "coding" and solution to null.
+- The "solution" field should ONLY be null if phase is "idle" (no assessment content visible) or "coding" (only code, no problem text).
+- If you see errors or failed tests, set phase to "error_detected" and generate a fix.
 - The "error" field should be null if phase is not "error_detected".
 - NEVER generate placeholder or pseudocode. Every code block must be complete, compilable, and correct.
 - For Python: include the complete function definition with proper indentation.
 - For Java/C++: include necessary imports/headers.
 - Assume CodeSignal's standard function signature format.
+- ALWAYS generate a solution when you detect a problem. This is the most important feature. Do NOT skip solution generation.
 
 CURRENT QUESTION NUMBER: ${questionNumber || 'unknown'}
 

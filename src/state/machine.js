@@ -118,6 +118,30 @@ function computeTextSimilarity(textA, textB) {
 function handleIdle(session, aiResponse) {
   session.unchangedFrameCount++;
 
+  // Even if phase is "idle", if Gemini generated a solution, return it
+  if (aiResponse.solution) {
+    sessionStore.updateSession(session.id, {
+      currentPhase: STATES.SOLUTION_GENERATED,
+      lastSolutionCode: aiResponse.solution.optimalCode || aiResponse.solution.code || '',
+      lastModelUsed: aiResponse._modelUsed || session.lastModelUsed,
+      unchangedFrameCount: 0,
+    });
+
+    if (session.questionNumber === 0) {
+      sessionStore.updateSession(session.id, { questionNumber: 1 });
+    }
+
+    return {
+      action: 'solution',
+      phase: STATES.SOLUTION_GENERATED,
+      questionNumber: session.questionNumber || 1,
+      difficulty: aiResponse.difficulty || 'medium',
+      extractedText: aiResponse.extractedText || '',
+      solution: aiResponse.solution,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
   const unreadableTooLong = session.unchangedFrameCount >= UNREADABLE_THRESHOLD;
 
   if (unreadableTooLong && session.currentPhase !== STATES.IDLE) {
@@ -316,13 +340,39 @@ function handleErrorDetected(session, aiResponse) {
 }
 
 /**
- * Handle coding phase — user is typing, no action needed.
+ * Handle coding phase — user is typing.
+ * IMPORTANT: Even in coding phase, if Gemini generated a solution (because it saw problem text),
+ * we still return that solution to the client.
  * @param {Object} session
  * @param {Object} aiResponse
  * @returns {Object}
  */
 function handleCoding(session, aiResponse) {
   session.unchangedFrameCount++;
+
+  // If Gemini included a solution even during "coding" phase, treat it as a solution
+  if (aiResponse.solution) {
+    sessionStore.updateSession(session.id, {
+      currentPhase: STATES.SOLUTION_GENERATED,
+      lastSolutionCode: aiResponse.solution.optimalCode || aiResponse.solution.code || '',
+      lastModelUsed: aiResponse._modelUsed || session.lastModelUsed,
+      unchangedFrameCount: 0,
+    });
+
+    if (session.questionNumber === 0) {
+      sessionStore.updateSession(session.id, { questionNumber: 1 });
+    }
+
+    return {
+      action: 'solution',
+      phase: STATES.SOLUTION_GENERATED,
+      questionNumber: session.questionNumber || 1,
+      difficulty: aiResponse.difficulty || 'medium',
+      extractedText: aiResponse.extractedText || '',
+      solution: aiResponse.solution,
+      timestamp: new Date().toISOString(),
+    };
+  }
 
   const shouldTransitionToMonitoring = session.unchangedFrameCount >= UNCHANGED_TO_MONITORING;
   const nextPhase = shouldTransitionToMonitoring ? STATES.MONITORING : STATES.SOLUTION_GENERATED;

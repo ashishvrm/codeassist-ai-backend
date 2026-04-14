@@ -141,15 +141,18 @@ async function preprocessImage(base64Image) {
 
 /**
  * Build the appropriate prompt based on session state.
+ * IMPORTANT: The frame analysis prompt handles ALL phase detection and solution generation.
+ * We only use specialized prompts for error recovery (when we already know the error context)
+ * and hard problem escalation (Q3-Q4 with known problem text).
  * @param {Object} session - Current session
- * @param {string} phase - Detected phase (or 'unknown' for first analysis)
+ * @param {string} phase - Previous session phase (hint only)
  * @returns {string} Prompt string
  */
 function buildPrompt(session, phase) {
   const language = session.language || process.env.PREFERRED_LANGUAGE || 'python';
   const history = prompts.formatConversationHistory(session.conversationHistory);
 
-  // Error recovery after failed fix
+  // Error recovery after failed fix — only use specialized prompt if we have code + error context
   if (phase === 'error_detected' && session.errorCycleCount > 0 && session.lastSolutionCode) {
     if (session.errorCycleCount >= 3) {
       return prompts.buildCycleBreakerPrompt({
@@ -166,17 +169,9 @@ function buildPrompt(session, phase) {
     });
   }
 
-  // Hard problem escalation
-  if (['reading_question', 'new_question'].includes(phase) && session.questionNumber >= 3) {
-    return prompts.buildHardProblemPrompt({
-      language,
-      problemText: session.currentProblemContext || 'See screenshot',
-      constraints: extractConstraints(session.currentProblemContext),
-      examples: extractExamples(session.currentProblemContext),
-    });
-  }
-
-  // Default frame analysis
+  // ALWAYS use the frame analysis prompt — it handles phase detection, solution generation,
+  // and error fixing all in one. This is critical: every frame gets the full prompt so Gemini
+  // can detect what's on screen and respond appropriately regardless of previous state.
   return prompts.buildFrameAnalysisPrompt({
     language,
     conversationHistory: history,
