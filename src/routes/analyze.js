@@ -113,10 +113,17 @@ router.post('/', async (req, res) => {
       sessionId: req.body?.sessionId,
     });
 
-    res.status(500).json({
+    const isRateLimit = err.message && (err.message.includes('429') || err.message.includes('quota'));
+    const statusCode = isRateLimit ? 429 : 500;
+    const errorMsg = isRateLimit
+      ? 'AI rate limit reached — waiting before retry'
+      : 'Analysis failed: ' + err.message;
+
+    res.status(statusCode).json({
       action: 'monitoring',
       phase: 'idle',
-      error: 'Analysis failed: ' + err.message,
+      error: errorMsg,
+      isRateLimit,
       timestamp: new Date().toISOString(),
     });
   }

@@ -13,7 +13,7 @@ services:
       - key: OPENAI_API_KEY
         sync: false
       - key: GEMINI_MODEL
-        value: gemini-2.5-flash
+        value: gemini-2.0-flash
       - key: OPENAI_MODEL
         value: gpt-4o
       - key: PREFERRED_LANGUAGE
