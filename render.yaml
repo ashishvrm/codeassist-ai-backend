@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: codeassist-ai-backend
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node src/index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: OPENAI_MODEL
+        value: gpt-4o
+      - key: PREFERRED_LANGUAGE
+        value: Javascript, csharp, python, java, typescript
+      - key: FRAME_INTERVAL_MS
+        value: "3000"
+      - key: SIMILARITY_THRESHOLD
+        value: "0.85"
+      - key: MAX_CONTEXT_MESSAGES
+        value: "20"
