@@ -6,6 +6,8 @@
 
 const gemini = require('./gemini');
 const openai = require('./openai');
+const groq = require('./groq');
+const openrouter = require('./openrouter');
 const prompts = require('./prompts');
 const sessionStore = require('../state/session');
 const logger = require('../utils/logger');
@@ -219,29 +221,80 @@ async function analyzeFrame(sessionId, base64Image) {
   const suggestedInterval = rateLimiter.callsThisMinute >= rateLimiter.WARN_PER_MINUTE ? 6000 : null;
 
   try {
-    let result;
+    // Build the provider chain: Gemini (with multi-key) → Groq → OpenRouter → OpenAI
+    const providers = [
+      {
+        name: 'gemini',
+        available: gemini.isAvailable(),
+        call: async () => {
+          recordCall('gemini');
+          return await gemini.analyzeFrame(prompt, processedImage, 15000);
+        },
+      },
+      {
+        name: 'groq',
+        available: groq.isAvailable(),
+        call: async () => await groq.analyzeFrame(prompt, processedImage, 20000),
+      },
+      {
+        name: 'openrouter',
+        available: openrouter.isAvailable(),
+        call: async () => await openrouter.analyzeFrame(prompt, processedImage, 25000),
+      },
+      {
+        name: 'openai',
+        available: openai.isAvailable(),
+        call: async () => await openai.analyzeFrame(prompt, processedImage, session.conversationHistory, 25000),
+      },
+    ];
 
-    if (selectedModel === 'gemini') {
-      recordCall('gemini');
-      result = await gemini.analyzeFrame(prompt, processedImage, 15000);
-    } else {
-      result = await openai.analyzeFrame(prompt, processedImage, session.conversationHistory, 25000);
+    let result = null;
+    let usedProvider = 'none';
+
+    for (const provider of providers) {
+      if (!provider.available) continue;
+
+      try {
+        logger.info('Trying provider', { provider: provider.name, sessionId });
+        result = await provider.call();
+        usedProvider = provider.name;
+
+        // If we got a parse error, try next provider
+        if (result._parseError && providers.indexOf(provider) < providers.length - 1) {
+          logger.warn('Provider returned garbage, trying next', { provider: provider.name });
+          continue;
+        }
+
+        break; // Success — stop trying
+      } catch (err) {
+        const isRateLimit = err.message && (err.message.includes('429') || err.message.includes('quota'));
+        logger.warn('Provider failed', {
+          provider: provider.name,
+          error: err.message.substring(0, 150),
+          isRateLimit,
+        });
+        continue; // Try next provider
+      }
     }
 
-    // Check for empty/garbage response from Gemini — fallback to OpenAI
-    if (selectedModel === 'gemini' && result._parseError && openai.isAvailable()) {
-      logger.warn('Gemini returned empty/garbage response, retrying with OpenAI', { sessionId });
-      result = await openai.analyzeFrame(prompt, processedImage, session.conversationHistory, 25000);
-      result._modelUsed = 'openai';
-    } else {
-      result._modelUsed = selectedModel;
+    if (!result) {
+      return {
+        phase: 'idle',
+        extractedText: 'All AI providers unavailable',
+        solution: null,
+        error: null,
+        _modelUsed: 'none',
+        _error: 'All AI providers failed. Retrying on next frame.',
+      };
     }
+
+    result._modelUsed = usedProvider;
 
     if (suggestedInterval) {
       result._suggestedInterval = suggestedInterval;
     }
 
-    // Update conversation history with rich context
+    // Update conversation history
     sessionStore.addToHistory(sessionId, {
       role: 'user',
       content: `Frame ${session.totalFramesSent}: [image analyzed] Q${session.questionNumber} phase=${phaseHint}`,
@@ -253,71 +306,26 @@ async function analyzeFrame(sessionId, base64Image) {
         problemTitle: result.problemTitle,
         hasSolution: !!result.solution,
         hasError: !!result.error,
-        solutionCode: result.solution ? (result.solution.optimalCode || result.solution.code || '').substring(0, 200) : null,
-        errorText: result.error ? result.error.errorText : null,
+        provider: usedProvider,
       }),
     });
 
-    // Update session state
     sessionStore.updateSession(sessionId, {
       previousFrameText: result.extractedText || '',
-      lastModelUsed: result._modelUsed || selectedModel,
+      lastModelUsed: usedProvider,
     });
 
     return result;
-  } catch (primaryError) {
-    logger.warn('Primary model failed, trying fallback', {
-      primaryModel: selectedModel,
-      error: primaryError.message,
-    });
-
-    // Fallback to other model
-    const fallbackModel = selectedModel === 'gemini' ? 'openai' : 'gemini';
-
-    if (fallbackModel === 'openai' && !openai.isAvailable()) {
-      throw primaryError;
-    }
-    if (fallbackModel === 'gemini' && !gemini.isAvailable()) {
-      throw primaryError;
-    }
-
-    try {
-      let result;
-      if (fallbackModel === 'gemini') {
-        recordCall('gemini');
-        result = await gemini.analyzeFrame(prompt, processedImage, 15000);
-      } else {
-        result = await openai.analyzeFrame(prompt, processedImage, session.conversationHistory, 25000);
-      }
-
-      result._modelUsed = fallbackModel;
-
-      sessionStore.addToHistory(sessionId, {
-        role: 'assistant',
-        content: JSON.stringify({ phase: result.phase, fallback: true }),
-      });
-
-      sessionStore.updateSession(sessionId, {
-        previousFrameText: result.extractedText || '',
-        lastModelUsed: fallbackModel,
-      });
-
-      return result;
-    } catch (fallbackError) {
-      logger.error('Both models failed', {
-        primaryError: primaryError.message,
-        fallbackError: fallbackError.message,
-      });
-
-      return {
-        phase: 'idle',
-        extractedText: 'AI temporarily unavailable',
-        solution: null,
-        error: null,
-        _modelUsed: 'none',
-        _error: 'Both AI models failed. Retrying on next frame.',
-      };
-    }
+  } catch (err) {
+    logger.error('Orchestrator unexpected error', { error: err.message });
+    return {
+      phase: 'idle',
+      extractedText: 'AI temporarily unavailable',
+      solution: null,
+      error: null,
+      _modelUsed: 'none',
+      _error: err.message,
+    };
   }
 }
 
