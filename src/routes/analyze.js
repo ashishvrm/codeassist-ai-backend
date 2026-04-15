@@ -87,7 +87,48 @@ router.post('/', async (req, res) => {
       unchangedFrameCount: 0,
     });
 
-    // Send to AI orchestrator
+    // If we already have a solution for the current question and the session is in
+    // SOLUTION_GENERATED or MONITORING state, return the cached solution instead of
+    // burning an API call. Only call Gemini when:
+    // 1. No solution exists yet (first question detection)
+    // 2. The state is error_detected (need a fix)
+    // 3. We need to check if a NEW question appeared
+    const currentPhase = session.currentPhase;
+    const hasSolution = session.lastSolutionCode && session.lastSolutionCode.length > 0;
+    const isStablePhase = ['solution_generated', 'monitoring'].includes(currentPhase);
+
+    if (hasSolution && isStablePhase) {
+      // Send frame to AI but ONLY for phase detection (is this still the same question?)
+      const aiResponse = await orchestrator.analyzeFrame(sessionId, frame);
+      const detectedPhase = aiResponse.phase || 'idle';
+
+      // If AI detects a new question or error, process normally
+      if (detectedPhase === 'new_question' || detectedPhase === 'error_detected' ||
+          stateMachine.isNewQuestion(session, aiResponse)) {
+        const result = stateMachine.processResponse(sessionId, aiResponse);
+        const elapsed = Date.now() - startTime;
+        logger.info('New question or error detected', {
+          sessionId, elapsed, action: result.action, phase: result.phase,
+          questionNumber: result.questionNumber,
+        });
+        return res.json(result);
+      }
+
+      // Same question — return cached solution without updating display
+      const elapsed = Date.now() - startTime;
+      logger.info('Same question, returning cached solution', {
+        sessionId, elapsed, questionNumber: session.questionNumber,
+      });
+      return res.json({
+        action: 'monitoring',
+        phase: 'solution_generated',
+        questionNumber: session.questionNumber,
+        cachedSolution: true,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // No solution yet or in error state — do full analysis
     const aiResponse = await orchestrator.analyzeFrame(sessionId, frame);
 
     // Process through state machine
