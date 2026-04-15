@@ -1,6 +1,6 @@
 /**
  * Frame analysis endpoint — the CORE of CodeAssist AI.
- * Called every ~3 seconds by the mobile app with a camera frame.
+ * Features: frame diffing, solution caching per question, fast error detection.
  * @module routes/analyze
  */
 
@@ -16,9 +16,7 @@ const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD) || 0.8
 
 /**
  * POST /api/analyze
- * Main frame analysis endpoint.
- * Body: { sessionId: string, frame: string (base64 JPEG), frameHash?: string }
- * Returns: structured response with action, phase, solution/error data
+ * Body: { sessionId, frame (base64 JPEG), frameHash? }
  */
 router.post('/', async (req, res) => {
   const startTime = Date.now();
@@ -26,21 +24,12 @@ router.post('/', async (req, res) => {
   try {
     const { sessionId, frame, frameHash } = req.body;
 
-    // Validate request
-    if (!sessionId) {
-      return res.status(400).json({ error: 'sessionId is required' });
-    }
-    if (!frame) {
-      return res.status(400).json({ error: 'frame (base64 image) is required' });
-    }
+    if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
+    if (!frame) return res.status(400).json({ error: 'frame (base64 image) is required' });
 
-    // Validate session
     const session = sessionStore.getSession(sessionId);
-    if (!session) {
-      return res.status(404).json({ error: 'Session not found. Start a new session.' });
-    }
+    if (!session) return res.status(404).json({ error: 'Session not found. Start a new session.' });
 
-    // Increment frame counter
     session.totalFramesSent++;
     sessionStore.updateSession(sessionId, { totalFramesSent: session.totalFramesSent });
 
@@ -51,7 +40,7 @@ router.post('/', async (req, res) => {
         const imageBuffer = Buffer.from(frame, 'base64');
         computedHash = await imageHash.computeHash(imageBuffer);
       } catch (hashErr) {
-        logger.warn('Hash computation failed, processing frame anyway', { error: hashErr.message });
+        logger.warn('Hash computation failed', { error: hashErr.message });
       }
     }
 
@@ -62,12 +51,6 @@ router.post('/', async (req, res) => {
         sessionStore.updateSession(sessionId, {
           previousFrameHash: computedHash,
           unchangedFrameCount: session.unchangedFrameCount,
-        });
-
-        logger.debug('Frame skipped (no change)', {
-          sessionId,
-          similarity: sim.toFixed(3),
-          unchangedCount: session.unchangedFrameCount,
         });
 
         return res.json({
@@ -81,44 +64,65 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // Update hash for next comparison
     sessionStore.updateSession(sessionId, {
       previousFrameHash: computedHash,
       unchangedFrameCount: 0,
     });
 
-    // If we already have a solution for the current question and the session is in
-    // SOLUTION_GENERATED or MONITORING state, return the cached solution instead of
-    // burning an API call. Only call Gemini when:
-    // 1. No solution exists yet (first question detection)
-    // 2. The state is error_detected (need a fix)
-    // 3. We need to check if a NEW question appeared
+    // SMART CACHING: If we have a cached solution for the current question
+    // and the session is stable, send frame for phase detection only.
+    // If it detects same question → return cache. New question or error → full process.
     const currentPhase = session.currentPhase;
     const hasSolution = session.lastSolutionCode && session.lastSolutionCode.length > 0;
     const isStablePhase = ['solution_generated', 'monitoring'].includes(currentPhase);
 
-    if (hasSolution && isStablePhase) {
-      // Send frame to AI but ONLY for phase detection (is this still the same question?)
-      const aiResponse = await orchestrator.analyzeFrame(sessionId, frame);
-      const detectedPhase = aiResponse.phase || 'idle';
+    // Always do full analysis — the AI will determine what's on screen
+    const aiResponse = await orchestrator.analyzeFrame(sessionId, frame);
+    const detectedPhase = aiResponse.phase || 'idle';
 
-      // If AI detects a new question or error, process normally
-      if (detectedPhase === 'new_question' || detectedPhase === 'error_detected' ||
-          stateMachine.isNewQuestion(session, aiResponse)) {
-        const result = stateMachine.processResponse(sessionId, aiResponse);
-        const elapsed = Date.now() - startTime;
-        logger.info('New question or error detected', {
-          sessionId, elapsed, action: result.action, phase: result.phase,
-          questionNumber: result.questionNumber,
-        });
-        return res.json(result);
+    // ERROR FAST PATH: If error detected, process immediately (no caching)
+    if (detectedPhase === 'error_detected') {
+      const result = stateMachine.processResponse(sessionId, aiResponse);
+      const elapsed = Date.now() - startTime;
+      logger.info('Error detected - fast path', { sessionId, elapsed });
+      return res.json(result);
+    }
+
+    // NEW QUESTION: If AI sees a different question, process and cache new solution
+    if (detectedPhase === 'new_question' || stateMachine.isNewQuestion(session, aiResponse)) {
+      const result = stateMachine.processResponse(sessionId, aiResponse);
+
+      // Cache the solution by question number
+      if (result.solution) {
+        cacheSolution(session, result.questionNumber, result.solution, result.difficulty);
       }
 
-      // Same question — return cached solution without updating display
       const elapsed = Date.now() - startTime;
-      logger.info('Same question, returning cached solution', {
-        sessionId, elapsed, questionNumber: session.questionNumber,
-      });
+      logger.info('New question detected', { sessionId, elapsed, questionNumber: result.questionNumber });
+      return res.json(result);
+    }
+
+    // SAME QUESTION + HAS SOLUTION: Return cached solution
+    if (hasSolution && isStablePhase && (detectedPhase === 'reading_question' || detectedPhase === 'coding' || detectedPhase === 'idle')) {
+      // Check if this is a question we've seen before (switch-back detection)
+      const cachedForTitle = getCachedSolution(session, aiResponse.problemTitle);
+      if (cachedForTitle) {
+        const elapsed = Date.now() - startTime;
+        logger.info('Returning cached solution (switch-back)', {
+          sessionId, elapsed, questionNumber: cachedForTitle.questionNumber,
+        });
+        return res.json({
+          action: 'solution',
+          phase: 'solution_generated',
+          questionNumber: cachedForTitle.questionNumber,
+          difficulty: cachedForTitle.difficulty,
+          solution: cachedForTitle.solution,
+          cachedSolution: true,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      // Same question, same solution — just monitoring
       return res.json({
         action: 'monitoring',
         phase: 'solution_generated',
@@ -128,18 +132,18 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // No solution yet or in error state — do full analysis
-    const aiResponse = await orchestrator.analyzeFrame(sessionId, frame);
-
-    // Process through state machine
+    // FIRST SOLUTION: No cached solution yet, process the AI response
     const result = stateMachine.processResponse(sessionId, aiResponse);
+
+    // Cache if we got a solution
+    if (result.solution) {
+      cacheSolution(session, result.questionNumber || session.questionNumber, result.solution, result.difficulty);
+    }
 
     const elapsed = Date.now() - startTime;
     logger.info('Frame analyzed', {
-      sessionId,
-      elapsed,
-      action: result.action,
-      phase: result.phase,
+      sessionId, elapsed,
+      action: result.action, phase: result.phase,
       questionNumber: result.questionNumber,
       model: aiResponse._modelUsed,
     });
@@ -147,25 +151,57 @@ router.post('/', async (req, res) => {
     res.json(result);
   } catch (err) {
     const elapsed = Date.now() - startTime;
-    logger.error('Frame analysis failed', {
-      error: err.message,
-      stack: err.stack,
-      elapsed,
-      sessionId: req.body?.sessionId,
-    });
+    logger.error('Frame analysis failed', { error: err.message, elapsed, sessionId: req.body?.sessionId });
 
     const isRateLimit = err.message && (err.message.includes('429') || err.message.includes('quota'));
-    const statusCode = isRateLimit ? 429 : 500;
-
-    res.status(statusCode).json({
+    res.status(isRateLimit ? 429 : 500).json({
       action: 'monitoring',
       phase: 'idle',
       error: err.message ? err.message.substring(0, 300) : 'Unknown error',
       isRateLimit,
-      model: process.env.GEMINI_MODEL || 'default',
       timestamp: new Date().toISOString(),
     });
   }
 });
+
+/**
+ * Cache a solution by question number and title for instant recall.
+ * @param {Object} session
+ * @param {number} questionNumber
+ * @param {Object} solution
+ * @param {string} difficulty
+ */
+function cacheSolution(session, questionNumber, solution, difficulty) {
+  if (!session._solutionCache) session._solutionCache = {};
+  const key = questionNumber || 0;
+  session._solutionCache[key] = {
+    questionNumber,
+    solution,
+    difficulty,
+    title: session.currentProblemTitle || '',
+    cachedAt: Date.now(),
+  };
+  logger.info('Solution cached', { sessionId: session.id, questionNumber, title: session.currentProblemTitle });
+}
+
+/**
+ * Look up a cached solution by problem title (for switch-back detection).
+ * @param {Object} session
+ * @param {string} problemTitle
+ * @returns {Object|null}
+ */
+function getCachedSolution(session, problemTitle) {
+  if (!session._solutionCache || !problemTitle) return null;
+  const titleLower = (problemTitle || '').trim().toLowerCase();
+  if (!titleLower) return null;
+
+  for (const entry of Object.values(session._solutionCache)) {
+    const cachedTitle = (entry.title || '').trim().toLowerCase();
+    if (cachedTitle && cachedTitle === titleLower) {
+      return entry;
+    }
+  }
+  return null;
+}
 
 module.exports = router;

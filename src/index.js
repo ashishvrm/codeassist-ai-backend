@@ -74,6 +74,22 @@ const server = app.listen(PORT, HOST, () => {
   console.log(`║  http://${localIP}:${PORT}                       ║`);
   console.log('╚══════════════════════════════════════════════════╝\n');
   logger.info('Server started', { host: HOST, port: PORT, localIP });
+
+  // Pre-warm AI connections — initializes clients and validates keys on startup
+  // so the first real request is fast (no cold-start delay)
+  setTimeout(() => {
+    try {
+      const gemini = require('./services/gemini');
+      const groq = require('./services/groq');
+      const openrouter = require('./services/openrouter');
+      gemini.isAvailable();
+      groq.isAvailable();
+      openrouter.isAvailable();
+      logger.info('AI providers pre-warmed');
+    } catch (e) {
+      logger.warn('Pre-warm failed (non-critical)', { error: e.message });
+    }
+  }, 500);
 });
 
 // Graceful shutdown
