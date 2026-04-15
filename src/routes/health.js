@@ -6,6 +6,7 @@
 const express = require('express');
 const router = express.Router();
 const orchestrator = require('../services/orchestrator');
+const gemini = require('../services/gemini');
 
 /**
  * GET /api/health
@@ -18,6 +19,7 @@ router.get('/', (req, res) => {
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
     geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash (default)',
+    keyPool: gemini.getKeyPoolStatus(),
     ai: {
       geminiAvailable: stats.geminiAvailable,
       openaiAvailable: stats.openaiAvailable,

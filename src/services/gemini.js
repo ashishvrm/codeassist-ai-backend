@@ -1,61 +1,146 @@
 /**
- * Google Gemini Vision API integration.
+ * Google Gemini Vision API integration with multi-key rotation.
+ * When one API key hits 429 rate limit, automatically rotates to the next key.
+ * Keys are configured via GEMINI_API_KEY (primary) and GEMINI_API_KEYS (comma-separated backups).
  * @module gemini
  */
 
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require('@google/generative-ai');
 const logger = require('../utils/logger');
 
-let genAI = null;
-let model = null;
+/** @type {Array<{ key: string, client: GoogleGenerativeAI, model: Object, exhausted: boolean }>} */
+let keyPool = [];
+let currentKeyIndex = 0;
+let initialized = false;
+
+const SAFETY_SETTINGS = [
+  { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+];
+
+const GENERATION_CONFIG = {
+  temperature: 0.1,
+  maxOutputTokens: 4096,
+};
 
 /**
- * Initialize the Gemini client. Called lazily on first use.
+ * Initialize the key pool from environment variables.
+ * Supports: GEMINI_API_KEY (single key) and GEMINI_API_KEYS (comma-separated list).
+ * All unique keys are pooled together.
  */
 function init() {
-  if (genAI) return;
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey.includes('__PASTE_')) {
-    logger.warn('Gemini API key not configured');
+  if (initialized) return;
+  initialized = true;
+
+  const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const allKeys = new Set();
+
+  // Primary key
+  const primaryKey = process.env.GEMINI_API_KEY;
+  if (primaryKey && !primaryKey.includes('__PASTE_')) {
+    allKeys.add(primaryKey.trim());
+  }
+
+  // Additional keys (comma-separated)
+  const extraKeys = process.env.GEMINI_API_KEYS;
+  if (extraKeys) {
+    extraKeys.split(',').forEach((k) => {
+      const trimmed = k.trim();
+      if (trimmed && !trimmed.includes('__PASTE_')) {
+        allKeys.add(trimmed);
+      }
+    });
+  }
+
+  if (allKeys.size === 0) {
+    logger.warn('No Gemini API keys configured');
     return;
   }
-  genAI = new GoogleGenerativeAI(apiKey);
-  model = genAI.getGenerativeModel({
-    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-    safetySettings: [
-      { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-      { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-      { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-      { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-    ],
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 4096,
-    },
+
+  for (const key of allKeys) {
+    const client = new GoogleGenerativeAI(key);
+    const model = client.getGenerativeModel({
+      model: modelName,
+      safetySettings: SAFETY_SETTINGS,
+      generationConfig: GENERATION_CONFIG,
+    });
+    keyPool.push({
+      key: key.substring(0, 8) + '...',  // Masked for logging
+      client,
+      model,
+      exhausted: false,
+    });
+  }
+
+  logger.info('Gemini key pool initialized', {
+    model: modelName,
+    keyCount: keyPool.length,
+    keys: keyPool.map((k) => k.key),
   });
-  logger.info('Gemini client initialized', { model: process.env.GEMINI_MODEL });
 }
 
 /**
- * Check if Gemini is available (API key configured).
+ * Get the current active model, rotating past exhausted keys.
+ * @returns {Object|null} { model, keyInfo } or null if all exhausted
+ */
+function getActiveModel() {
+  if (keyPool.length === 0) return null;
+
+  // Try each key starting from current index
+  for (let i = 0; i < keyPool.length; i++) {
+    const idx = (currentKeyIndex + i) % keyPool.length;
+    if (!keyPool[idx].exhausted) {
+      currentKeyIndex = idx;
+      return { model: keyPool[idx].model, keyInfo: keyPool[idx].key, keyIndex: idx };
+    }
+  }
+
+  // All keys exhausted — reset and try the first one (maybe quota reset)
+  logger.warn('All Gemini API keys exhausted, resetting pool');
+  keyPool.forEach((k) => { k.exhausted = false; });
+  currentKeyIndex = 0;
+  return { model: keyPool[0].model, keyInfo: keyPool[0].key, keyIndex: 0 };
+}
+
+/**
+ * Mark current key as exhausted (429'd) and rotate to the next one.
+ * @param {number} keyIndex - Index of the exhausted key
+ */
+function markKeyExhausted(keyIndex) {
+  if (keyIndex >= 0 && keyIndex < keyPool.length) {
+    keyPool[keyIndex].exhausted = true;
+    const remaining = keyPool.filter((k) => !k.exhausted).length;
+    logger.warn('API key exhausted, rotating', {
+      exhaustedKey: keyPool[keyIndex].key,
+      remainingKeys: remaining,
+      totalKeys: keyPool.length,
+    });
+    // Move to next key
+    currentKeyIndex = (keyIndex + 1) % keyPool.length;
+  }
+}
+
+/**
+ * Check if Gemini is available (at least one key configured).
  * @returns {boolean}
  */
 function isAvailable() {
   init();
-  return model !== null;
+  return keyPool.length > 0;
 }
 
 /**
- * Send an image + prompt to Gemini Vision and get a parsed JSON response.
- * Includes retry logic with exponential backoff for rate limiting.
+ * Send an image + prompt to Gemini Vision with auto key rotation on 429.
  * @param {string} prompt - Text prompt
  * @param {string} base64Image - Base64-encoded JPEG image
- * @param {number} [timeoutMs=15000] - Request timeout in milliseconds
- * @returns {Promise<Object>} Parsed JSON response from Gemini
+ * @param {number} [timeoutMs=15000] - Request timeout
+ * @returns {Promise<Object>} Parsed JSON response
  */
 async function analyzeFrame(prompt, base64Image, timeoutMs = 15000) {
   init();
-  if (!model) {
+  if (keyPool.length === 0) {
     throw new Error('Gemini not configured');
   }
 
@@ -66,14 +151,18 @@ async function analyzeFrame(prompt, base64Image, timeoutMs = 15000) {
     },
   };
 
-  const maxRetries = 3;
-  const backoffMs = [1000, 2000, 4000];
+  // Try each key in the pool
+  let lastError = null;
+  for (let attempt = 0; attempt < keyPool.length; attempt++) {
+    const active = getActiveModel();
+    if (!active) {
+      throw lastError || new Error('All Gemini API keys exhausted');
+    }
 
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const startTime = Date.now();
 
-      const resultPromise = model.generateContent([prompt, imagePart]);
+      const resultPromise = active.model.generateContent([prompt, imagePart]);
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Gemini request timed out')), timeoutMs)
       );
@@ -83,24 +172,30 @@ async function analyzeFrame(prompt, base64Image, timeoutMs = 15000) {
       const text = response.text();
       const elapsed = Date.now() - startTime;
 
-      logger.info('Gemini response received', { elapsed, textLength: text.length, attempt });
+      logger.info('Gemini response received', {
+        elapsed,
+        textLength: text.length,
+        key: active.keyInfo,
+      });
 
       return parseAIResponse(text);
     } catch (err) {
       const isRateLimit = err.status === 429 || (err.message && err.message.includes('429'));
-      const isTimeout = err.message && err.message.includes('timed out');
 
-      if (attempt < maxRetries && (isRateLimit || isTimeout)) {
-        const delay = backoffMs[attempt] || 4000;
-        logger.warn('Gemini retry', { attempt: attempt + 1, reason: isRateLimit ? 'rate_limit' : 'timeout', delay });
-        await sleep(delay);
-        continue;
+      if (isRateLimit) {
+        markKeyExhausted(active.keyIndex);
+        lastError = err;
+        continue; // Try next key immediately
       }
 
-      logger.error('Gemini request failed', { error: err.message, attempt });
+      // Non-rate-limit error — don't rotate, just throw
+      logger.error('Gemini request failed', { error: err.message, key: active.keyInfo });
       throw err;
     }
   }
+
+  // All keys failed
+  throw lastError || new Error('All Gemini API keys rate limited');
 }
 
 /**
@@ -111,12 +206,13 @@ async function analyzeFrame(prompt, base64Image, timeoutMs = 15000) {
  */
 async function analyzeText(prompt, timeoutMs = 15000) {
   init();
-  if (!model) {
+  const active = getActiveModel();
+  if (!active) {
     throw new Error('Gemini not configured');
   }
 
   const startTime = Date.now();
-  const resultPromise = model.generateContent([prompt]);
+  const resultPromise = active.model.generateContent([prompt]);
   const timeoutPromise = new Promise((_, reject) =>
     setTimeout(() => reject(new Error('Gemini request timed out')), timeoutMs)
   );
@@ -131,7 +227,6 @@ async function analyzeText(prompt, timeoutMs = 15000) {
 
 /**
  * Parse AI response text into a JSON object.
- * Handles markdown-wrapped JSON and malformed responses.
  * @param {string} text - Raw response text
  * @returns {Object} Parsed response
  */
@@ -142,7 +237,6 @@ function parseAIResponse(text) {
 
   let cleaned = text.trim();
 
-  // Strip markdown code fences
   if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
   }
@@ -150,7 +244,6 @@ function parseAIResponse(text) {
   try {
     return JSON.parse(cleaned);
   } catch (e) {
-    // Try to extract JSON object from the text
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       try {
@@ -172,11 +265,16 @@ function parseAIResponse(text) {
 }
 
 /**
- * @param {number} ms
- * @returns {Promise<void>}
+ * Get key pool status for health endpoint.
+ * @returns {Object}
  */
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function getKeyPoolStatus() {
+  return {
+    totalKeys: keyPool.length,
+    activeKeys: keyPool.filter((k) => !k.exhausted).length,
+    currentKeyIndex,
+    keys: keyPool.map((k) => ({ key: k.key, exhausted: k.exhausted })),
+  };
 }
 
-module.exports = { analyzeFrame, analyzeText, isAvailable, parseAIResponse };
+module.exports = { analyzeFrame, analyzeText, isAvailable, parseAIResponse, getKeyPoolStatus };
