@@ -204,4 +204,90 @@ function getCachedSolution(session, problemTitle) {
   return null;
 }
 
+/**
+ * POST /api/analyze/retry
+ * Generate an alternative solution using a different algorithm.
+ * Called when previous solution didn't work (no visible error).
+ * Body: { sessionId }
+ */
+router.post('/retry', async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const { sessionId } = req.body;
+    if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
+
+    const session = sessionStore.getSession(sessionId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    if (!session.lastSolutionCode) {
+      return res.status(400).json({ error: 'No previous solution to retry' });
+    }
+
+    const prompts = require('../services/prompts');
+    const language = session.language || process.env.PREFERRED_LANGUAGE || 'python';
+
+    const prompt = prompts.buildAlternativeApproachPrompt({
+      language,
+      problemContext: session.currentProblemContext || 'See previous context',
+      previousCode: session.lastSolutionCode,
+    });
+
+    // Use the latest frame if available, otherwise text-only
+    const gemini = require('../services/gemini');
+    let aiResponse;
+    try {
+      aiResponse = await gemini.analyzeText(prompt, 20000);
+    } catch (err) {
+      // Fallback providers
+      const groq = require('../services/groq');
+      const openrouter = require('../services/openrouter');
+      if (groq.isAvailable()) {
+        // Groq needs image, use text fallback
+        aiResponse = { phase: 'reading_question', solution: null, error: null };
+      } else {
+        throw err;
+      }
+    }
+
+    if (aiResponse.solution) {
+      sessionStore.updateSession(sessionId, {
+        lastSolutionCode: aiResponse.solution.optimalCode || aiResponse.solution.code || '',
+        currentPhase: 'solution_generated',
+      });
+
+      // Update cache
+      if (session._solutionCache && session.questionNumber) {
+        session._solutionCache[session.questionNumber] = {
+          questionNumber: session.questionNumber,
+          solution: aiResponse.solution,
+          difficulty: aiResponse.difficulty || 'medium',
+          title: session.currentProblemTitle || '',
+          cachedAt: Date.now(),
+        };
+      }
+    }
+
+    const elapsed = Date.now() - startTime;
+    logger.info('Alternative solution generated', { sessionId, elapsed, hasSolution: !!aiResponse.solution });
+
+    res.json({
+      action: 'solution',
+      phase: 'solution_generated',
+      questionNumber: session.questionNumber,
+      difficulty: aiResponse.difficulty || 'medium',
+      solution: aiResponse.solution,
+      isAlternative: true,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    logger.error('Retry failed', { error: err.message });
+    res.status(500).json({
+      action: 'monitoring',
+      error: err.message ? err.message.substring(0, 300) : 'Retry failed',
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
 module.exports = router;

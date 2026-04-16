@@ -87,6 +87,16 @@ RULES:
 - Assume CodeSignal's standard function signature format.
 - ALWAYS generate a solution when you detect a problem. This is the most important feature. Do NOT skip solution generation.
 
+SELF-VERIFICATION (MANDATORY before returning any code):
+- You MUST mentally execute your solution against EVERY example input/output shown on screen.
+- Walk through your code line by line with the first example. Verify the output matches exactly.
+- Walk through your code with the second example. Verify the output matches exactly.
+- Check edge cases: empty input, single element, maximum constraints, negative numbers if applicable.
+- If your solution fails ANY example during mental execution, FIX IT before returning.
+- NEVER return code that you haven't verified against the visible examples.
+- If no examples are visible, test with at least 2 simple cases you construct yourself.
+- The code you return must be CORRECT. Incorrect code wastes the user's time.
+
 CURRENT QUESTION NUMBER: ${questionNumber || 'unknown'}
 
 CONTEXT FROM PREVIOUS FRAMES:
@@ -259,10 +269,58 @@ function formatConversationHistory(history, maxEntries = 6) {
     .join('\n\n');
 }
 
+/**
+ * Build an alternative approach prompt — used when previous solution didn't work silently.
+ * @param {Object} options
+ * @param {string} options.language - Preferred coding language
+ * @param {string} options.problemContext - Original problem statement
+ * @param {string} options.previousCode - The code that didn't work
+ * @returns {string} Complete prompt string
+ */
+function buildAlternativeApproachPrompt({ language, problemContext, previousCode }) {
+  return `The previous solution for this problem was typed in but DID NOT WORK. There was no explicit error message — it either produced wrong output, timed out, or failed silently.
+
+PREVIOUS SOLUTION THAT FAILED:
+\`\`\`${language}
+${previousCode}
+\`\`\`
+
+ORIGINAL PROBLEM:
+${problemContext}
+
+You MUST:
+1. Analyze WHY the previous solution might have failed (wrong logic, missed edge case, TLE, off-by-one, etc.)
+2. Use a COMPLETELY DIFFERENT algorithm or approach
+3. If the previous used brute force, use an optimal approach. If it used DP, try greedy. If it used BFS, try DFS or vice versa.
+4. Mentally trace through ALL visible examples to verify correctness BEFORE returning
+5. Handle ALL edge cases: empty input, single element, max constraints, negative numbers
+
+RESPOND IN JSON (no markdown, no backticks, just raw JSON):
+{
+  "phase": "reading_question",
+  "difficulty": "medium",
+  "extractedText": "",
+  "problemTitle": "",
+  "solution": {
+    "language": "${language}",
+    "approach": "NEW approach: [describe what's different]",
+    "bruteForceCode": null,
+    "optimalCode": "Complete new solution using different algorithm",
+    "timeComplexity": "O(...)",
+    "spaceComplexity": "O(...)",
+    "edgeCases": ["edge case 1", "edge case 2"]
+  },
+  "error": null
+}
+
+CRITICAL: The new solution MUST use a fundamentally different approach. Do NOT just tweak the previous code.`;
+}
+
 module.exports = {
   buildFrameAnalysisPrompt,
   buildErrorRecoveryPrompt,
   buildHardProblemPrompt,
   buildCycleBreakerPrompt,
+  buildAlternativeApproachPrompt,
   formatConversationHistory,
 };
