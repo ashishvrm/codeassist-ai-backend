@@ -8,6 +8,7 @@ const gemini = require('./gemini');
 const openai = require('./openai');
 const groq = require('./groq');
 const openrouter = require('./openrouter');
+const mistral = require('./mistral');
 const prompts = require('./prompts');
 const sessionStore = require('../state/session');
 const logger = require('../utils/logger');
@@ -221,7 +222,7 @@ async function analyzeFrame(sessionId, base64Image) {
   const suggestedInterval = rateLimiter.callsThisMinute >= rateLimiter.WARN_PER_MINUTE ? 6000 : null;
 
   try {
-    // Build the provider chain: Gemini (with multi-key) → Groq → OpenRouter → OpenAI
+    // Build the provider chain: Gemini (with multi-key) → Mistral → OpenRouter → Groq → OpenAI
     const providers = [
       {
         name: 'gemini',
@@ -232,14 +233,19 @@ async function analyzeFrame(sessionId, base64Image) {
         },
       },
       {
-        name: 'groq',
-        available: groq.isAvailable(),
-        call: async () => await groq.analyzeFrame(prompt, processedImage, 20000),
+        name: 'mistral',
+        available: mistral.isAvailable(),
+        call: async () => await mistral.analyzeFrame(prompt, processedImage, 22000),
       },
       {
         name: 'openrouter',
         available: openrouter.isAvailable(),
         call: async () => await openrouter.analyzeFrame(prompt, processedImage, 25000),
+      },
+      {
+        name: 'groq',
+        available: groq.isAvailable(),
+        call: async () => await groq.analyzeFrame(prompt, processedImage, 20000),
       },
       {
         name: 'openai',

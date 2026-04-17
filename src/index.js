@@ -80,9 +80,11 @@ const server = app.listen(PORT, HOST, () => {
   setTimeout(() => {
     try {
       const gemini = require('./services/gemini');
+      const mistral = require('./services/mistral');
       const groq = require('./services/groq');
       const openrouter = require('./services/openrouter');
       gemini.isAvailable();
+      mistral.isAvailable();
       groq.isAvailable();
       openrouter.isAvailable();
       logger.info('AI providers pre-warmed');
