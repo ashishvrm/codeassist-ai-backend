@@ -64,7 +64,8 @@ RESPOND IN THIS EXACT JSON FORMAT (no markdown, no backticks, just raw JSON):
     "optimalCode": "Complete optimal solution code",
     "timeComplexity": "O(...)",
     "spaceComplexity": "O(...)",
-    "edgeCases": ["edge case 1", "edge case 2"]
+    "edgeCases": ["edge case 1", "edge case 2"],
+    "newLines": [3, 4, 5]
   },
   "error": {
     "errorText": "Exact error message from screen",
@@ -96,6 +97,15 @@ SELF-VERIFICATION (MANDATORY before returning any code):
 - NEVER return code that you haven't verified against the visible examples.
 - If no examples are visible, test with at least 2 simple cases you construct yourself.
 - The code you return must be CORRECT. Incorrect code wastes the user's time.
+
+NEW LINES HIGHLIGHTING (IMPORTANT):
+- In the "newLines" field of the solution object, return an array of 1-indexed line numbers within "optimalCode" that represent NEWLY ADDED or MODIFIED lines.
+- If the screen shows existing code (partial function, starter code, previous attempt), compare your solution against that existing code and list ONLY the line numbers that are new or changed.
+- If NO existing code is visible on screen (fresh problem, blank editor), set "newLines" to an empty array [] — this signals "everything is new, no highlighting needed."
+- If existing code is visible and you're extending/modifying it, include every new line number and every modified line number.
+- Line numbers must be 1-indexed and must match the line numbers in your "optimalCode" string (split by \\n).
+- Example: if optimalCode is "function foo(){\\n  a=1;\\n  b=2;\\n  return a+b;\\n}" and only lines 2, 3, 4 are new, return "newLines": [2, 3, 4].
+- Be accurate but don't stress — this is for visual highlighting only, the code itself must still be complete.
 
 CODE STYLE (MANDATORY — make it look human-written, not AI-generated):
 - Use SHORT casual variable names like a real person under time pressure: i, j, n, res, cnt, tmp, cur, prev, ans, arr, s, l, r, lo, hi, freq, seen, vis — NOT descriptiveVariableName or maximum_profit_value
