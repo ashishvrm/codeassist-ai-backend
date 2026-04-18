@@ -79,10 +79,12 @@ const server = app.listen(PORT, HOST, () => {
   // so the first real request is fast (no cold-start delay)
   setTimeout(() => {
     try {
+      const claude = require('./services/claude');
       const gemini = require('./services/gemini');
       const mistral = require('./services/mistral');
       const groq = require('./services/groq');
       const openrouter = require('./services/openrouter');
+      claude.isAvailable();
       gemini.isAvailable();
       mistral.isAvailable();
       groq.isAvailable();

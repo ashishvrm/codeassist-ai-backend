@@ -7,6 +7,7 @@ const express = require('express');
 const router = express.Router();
 const orchestrator = require('../services/orchestrator');
 const gemini = require('../services/gemini');
+const claude = require('../services/claude');
 const mistral = require('../services/mistral');
 const groq = require('../services/groq');
 const openrouter = require('../services/openrouter');
@@ -26,11 +27,13 @@ router.get('/', (req, res) => {
     geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash (default)',
     keyPool: gemini.getKeyPoolStatus(),
     ai: {
+      claudeAvailable: claude.isAvailable(),
       geminiAvailable: stats.geminiAvailable,
       mistralAvailable: mistral.isAvailable(),
       openrouterAvailable: openrouter.isAvailable(),
       groqAvailable: groq.isAvailable(),
       openaiAvailable: openai.isAvailable(),
+      claudeModel: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6 (default)',
       mistralModel: process.env.MISTRAL_MODEL || 'pixtral-12b-2409 (default)',
       geminiCallsThisMinute: stats.geminiCallsThisMinute,
       geminiCallsToday: stats.geminiCallsToday,
@@ -106,6 +109,85 @@ router.get('/mistral', async (req, res) => {
     });
   } catch (err) {
     logger.warn('Mistral health check failed', { error: err.message });
+    return res.status(200).json({
+      ok: false,
+      stage: 'network',
+      reason: err.message,
+      elapsedMs: Date.now() - start,
+    });
+  }
+});
+
+/**
+ * GET /api/health/claude
+ * Deep-check: pings the Anthropic API with a tiny text request to confirm
+ * the key is valid and has credit. Returns stage/status so 401 (invalid key),
+ * 400 (credit too low), and network failures are clearly distinguishable.
+ */
+router.get('/claude', async (req, res) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || apiKey.includes('__PASTE_')) {
+    return res.status(400).json({
+      ok: false,
+      stage: 'config',
+      reason: 'ANTHROPIC_API_KEY not set in environment',
+    });
+  }
+
+  const model = process.env.CLAUDE_MODEL || 'claude-sonnet-4-6';
+  const start = Date.now();
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 10,
+        messages: [{ role: 'user', content: 'Reply with the single word: OK' }],
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+    const elapsed = Date.now() - start;
+    const bodyText = await response.text();
+
+    if (!response.ok) {
+      return res.status(200).json({
+        ok: false,
+        stage: 'api',
+        httpStatus: response.status,
+        model,
+        elapsedMs: elapsed,
+        body: bodyText.substring(0, 300),
+      });
+    }
+
+    let reply = '';
+    try {
+      const data = JSON.parse(bodyText);
+      const textBlock = (data.content || []).find((b) => b.type === 'text');
+      reply = textBlock?.text || '';
+    } catch (_) {}
+
+    return res.json({
+      ok: true,
+      stage: 'api',
+      httpStatus: response.status,
+      model,
+      elapsedMs: elapsed,
+      reply: reply.substring(0, 50),
+    });
+  } catch (err) {
+    logger.warn('Claude health check failed', { error: err.message });
     return res.status(200).json({
       ok: false,
       stage: 'network',

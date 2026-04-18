@@ -4,6 +4,7 @@
  * @module orchestrator
  */
 
+const claude = require('./claude');
 const gemini = require('./gemini');
 const openai = require('./openai');
 const groq = require('./groq');
@@ -222,8 +223,13 @@ async function analyzeFrame(sessionId, base64Image) {
   const suggestedInterval = rateLimiter.callsThisMinute >= rateLimiter.WARN_PER_MINUTE ? 6000 : null;
 
   try {
-    // Build the provider chain: Gemini (with multi-key) → Mistral → OpenRouter → Groq → OpenAI
+    // Build the provider chain: Claude → Gemini (with multi-key) → Mistral → OpenRouter → Groq → OpenAI
     const providers = [
+      {
+        name: 'claude',
+        available: claude.isAvailable(),
+        call: async () => await claude.analyzeFrame(prompt, processedImage, 30000),
+      },
       {
         name: 'gemini',
         available: gemini.isAvailable(),
